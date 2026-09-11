@@ -50,7 +50,6 @@ namespace GW::Render {
         void(__cdecl* GrTransformOrthographic)(int slot, float* bounds, float depth_scale);
         float*(__cdecl* GrTransformGetCurrent)(int slot);
         void(__cdecl* GrTransformSetCurrent)(int slot, float* matrix);
-        void(__cdecl* GrTransformSnapshotRelease)(void* snapshot);
         void(__cdecl* GrRenderSceneLists)(void* programs, void* secondary_programs, int mode, void* clear_color, int render_target);
         void(__cdecl* GmViewBuildSceneLists)(void* frame, float* delta_time);
         void(__cdecl* GmWorldUpdateView)(float delta_time, float* eye, float* target, float* up, float* clear_color);

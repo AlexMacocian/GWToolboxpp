@@ -494,6 +494,7 @@ void WeatherModule::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
     Wind::SetGustiness(wind_gustiness);
     OnSettingsLoaded();
     WeatherEffects::ValidateSettings();
+    if (initialized && atmosphere_enabled) Skybox::Initialize();
     Reset();
 }
 
@@ -763,6 +764,7 @@ void WeatherModule::DrawSettingsInternal()
 void WeatherModule::Draw(IDirect3DDevice9* device)
 {
     if (!initialized || !device) return;
+    if (atmosphere_enabled) Skybox::Initialize();
     if (GWToolbox::ShouldDisableToolbox() || !GW::Map::GetIsMapLoaded()
         || GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading
         || GW::Map::GetIsInCinematic()) {
@@ -840,7 +842,7 @@ void WeatherModule::Initialize()
     RegisterSettings(this);
     initialized = true;
     last_wind_tick = TIMER_INIT();
-    Skybox::Initialize();
+    if (atmosphere_enabled) Skybox::Initialize();
     WeatherEffects::Initialize();
     GW::Chat::CreateCommand(&chat_hook_entry, L"weather", CmdWeather);
     GW::Chat::CreateCommand(&chat_hook_entry, L"climate", CmdClimate);

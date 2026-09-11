@@ -33,8 +33,6 @@
 #include "Widgets/Minimap/Shaders/world_fog_ps.h"
 #include "Widgets/Minimap/Shaders/shadow_terrain_replay_vs.h"
 #include "Widgets/Minimap/Shaders/shadow_terrain_replay_ps.h"
-#include "Widgets/Minimap/Shaders/shadow_terrain_receive_vs.h"
-#include "Widgets/Minimap/Shaders/shadow_terrain_receive_ps.h"
 #include "Widgets/Minimap/Shaders/shadow_screenspace_ps.h"
 #include "Widgets/Minimap/Shaders/ocean_initial_ps.h"
 #include "Widgets/Minimap/Shaders/ocean_phase_ps.h"
@@ -259,42 +257,21 @@ namespace {
     IDirect3DSurface9* shadow_preview_depth = nullptr;
     IDirect3DVertexShader9* shadow_terrain_replay_vs_object = nullptr;
     IDirect3DPixelShader9* shadow_terrain_replay_ps_object = nullptr;
-    IDirect3DVertexShader9* shadow_terrain_receive_vs_object = nullptr;
-    IDirect3DPixelShader9* shadow_terrain_receive_ps_object = nullptr;
     IDirect3DPixelShader9* shadow_screenspace_ps_object = nullptr;
 
-    uint32_t shadow_depth_surface_width = 0;
-    uint32_t shadow_depth_surface_height = 0;
     uint32_t shadow_camera_depth_width = 0;
     uint32_t shadow_camera_depth_height = 0;
     bool shadow_camera_depth_copy_succeeded = false;
 
     const char* shadow_camera_depth_failure = "none";
-    bool shadow_camera_depth_resz_supported = false;
 
-    D3DFORMAT shadow_depth_surface_format = D3DFMT_UNKNOWN;
-    D3DMULTISAMPLE_TYPE shadow_depth_surface_msaa = D3DMULTISAMPLE_NONE;
-    DWORD shadow_depth_surface_msaa_quality = 0;
-    uint32_t shadow_render_target_width = 0;
-    uint32_t shadow_render_target_height = 0;
-    D3DFORMAT shadow_render_target_format = D3DFMT_UNKNOWN;
-    D3DMULTISAMPLE_TYPE shadow_render_target_msaa = D3DMULTISAMPLE_NONE;
-    DWORD shadow_render_target_msaa_quality = 0;
-    uint32_t shadow_reported_viewport_width = 0;
-    uint32_t shadow_reported_viewport_height = 0;
-    D3DVIEWPORT9 shadow_device_viewport{};
-    bool shadow_device_viewport_valid = false;
-    DWORD shadow_replay_saved_z_enable = D3DZB_TRUE;
-    DWORD shadow_replay_saved_z_write = TRUE;
-    DWORD shadow_replay_saved_z_func = D3DCMP_LESSEQUAL;
-    bool shadow_replay_depth_guarded_this_draw = false;
     uint32_t shadow_replay_depth_wipe_blocked = 0;
-    std::array<uint32_t, 36> shadow_replay_depth_histogram{};
     uint32_t shadow_screenspace_draw_count = 0;
 
     bool resources_failed = false;
     bool shadow_preview_failed = false;
-    bool shadow_preview_depth_sampleable = false;
+    bool shadow_preview_gpu_mode = false;
+    bool shadow_replay_shaders_failed = false;
     D3DFORMAT shadow_preview_format = D3DFMT_UNKNOWN;
     uint32_t shadow_preview_depth_precision = 8;
 
@@ -313,7 +290,6 @@ namespace {
     using GrTransformOrthographic_pt = decltype(GW::Render::WorldRenderBindings::GrTransformOrthographic);
     using GrTransformGetCurrent_pt = decltype(GW::Render::WorldRenderBindings::GrTransformGetCurrent);
     using GrTransformSetCurrent_pt = decltype(GW::Render::WorldRenderBindings::GrTransformSetCurrent);
-    using GrTransformSnapshotRelease_pt = decltype(GW::Render::WorldRenderBindings::GrTransformSnapshotRelease);
     using GrRenderSceneLists_pt = decltype(GW::Render::WorldRenderBindings::GrRenderSceneLists);
     using GmViewBuildSceneLists_pt = decltype(GW::Render::WorldRenderBindings::GmViewBuildSceneLists);
     using GmWorldUpdateView_pt = decltype(GW::Render::WorldRenderBindings::GmWorldUpdateView);
@@ -338,7 +314,6 @@ namespace {
     GrTransformOrthographic_pt GrTransformOrthographic_Func = nullptr;
     GrTransformGetCurrent_pt GrTransformGetCurrent_Func = nullptr;
     GrTransformSetCurrent_pt GrTransformSetCurrent_Func = nullptr;
-    GrTransformSnapshotRelease_pt GrTransformSnapshotRelease_Func = nullptr;
     GrRenderSceneLists_pt GrRenderSceneLists_Func = nullptr;
     GrRenderSceneLists_pt GrRenderSceneLists_Ret = nullptr;
     GmViewBuildSceneLists_pt GmViewBuildSceneLists_Func = nullptr;
@@ -421,8 +396,6 @@ namespace {
     uint32_t shadow_terrain_visibility_override_count = 0;
     uint32_t shadow_terrain_queue_count = 0;
     uint32_t shadow_terrain_cull_bypass_count = 0;
-    uint32_t shadow_terrain_original_absolute_count = 0;
-    uint32_t shadow_terrain_original_relative_count = 0;
 
     using SetRenderTarget_pt = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
     using SetDepthStencilSurface_pt = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DSurface9*);
@@ -437,10 +410,6 @@ namespace {
     DrawPrimitive_pt DrawPrimitive_Func = nullptr, DrawPrimitive_Ret = nullptr;
     DrawIndexedPrimitive_pt DrawIndexedPrimitive_Func = nullptr, DrawIndexedPrimitive_Ret = nullptr;
 
-    struct ProgramSnapshotSwap {
-        void** slot;
-        void* original;
-    };
     inline constexpr size_t kGrRenderProgramSize = 0xb8;
     inline constexpr size_t kGrRenderModelEntrySize = 0x7c;
     struct ProgramStateBackup {
@@ -449,11 +418,7 @@ namespace {
         void* model_entries;
         std::vector<uint8_t> model_entry_state;
     };
-    std::vector<ProgramSnapshotSwap> program_snapshot_swaps;
     std::vector<ProgramStateBackup> program_state_backups;
-    void* shadow_absolute_transform_snapshot = nullptr;
-    void* shadow_relative_transform_snapshot = nullptr;
-    void* shadow_original_absolute_snapshot = nullptr;
     bool shadow_replay_active = false;
 
     bool shadow_reuse_shadow_map = false;
@@ -488,7 +453,6 @@ namespace {
     uint32_t shadow_replay_renderer = 0;
     uint32_t shadow_replay_queue_count = 0;
     uint32_t shadow_replay_submission_count = 0;
-    uint32_t shadow_replay_swap_count = 0;
     uint32_t shadow_replay_target_redirects = 0;
     uint32_t shadow_replay_viewport_redirects = 0;
     uint32_t shadow_replay_draw_count = 0;
@@ -525,12 +489,8 @@ namespace {
     };
 
     std::vector<CapturedTerrainDraw> captured_terrain_draws;
-    bool shadow_gpu_capture_active = false;
     bool shadow_gpu_resource_capture_active = false;
     bool shadow_gpu_current_program_terrain = false;
-    void* shadow_gpu_current_program = nullptr;
-    uint32_t shadow_gpu_current_program_handle = 0;
-    uint32_t shadow_gpu_current_gr_call = 0;
     uint32_t shadow_gpu_captured_draw_count = 0;
     uint32_t shadow_gpu_replayed_draw_count = 0;
     DirectX::XMFLOAT4X4A shadow_gpu_light_view{};
@@ -549,30 +509,6 @@ namespace {
     ShadowCamera::DirectionalCamera shadow_light_camera_state{};
     bool shadow_light_camera_state_ready = false;
     bool shadow_native_vertical_clamped = false;
-
-    struct GpuProgramDrawDiagnostic {
-        uint32_t gr_call;
-        uint32_t program_handle;
-        uintptr_t program;
-        bool terrain;
-        uintptr_t vertex_shader;
-        uintptr_t pixel_shader;
-        uintptr_t declaration;
-        DWORD alpha_blend;
-        DWORD alpha_test;
-        DWORD alpha_ref;
-        DWORD src_blend;
-        DWORD dest_blend;
-        D3DPRIMITIVETYPE type;
-        UINT vertex_count;
-        UINT primitive_count;
-        std::array<float, 13> model_transform;
-        std::array<D3DVERTEXELEMENT9, MAXD3DDECLLENGTH + 1> elements;
-        UINT element_count;
-    };
-
-    std::array<GpuProgramDrawDiagnostic, 1024> shadow_gpu_program_draws{};
-    uint32_t shadow_gpu_program_draw_count = 0;
 
     struct GrRenderProgramsCall {
         uintptr_t caller;
@@ -1309,18 +1245,15 @@ namespace {
 
     void ReleaseShadowPreviewResources()
     {
+        shadow_map_valid = false;
+        shadow_native_light_wvp_ready = false;
+        shadow_gpu_light_matrices_ready = false;
+        shadow_replay_shaders_failed = false;
         if (shadow_screenspace_ps_object) {
             shadow_screenspace_ps_object->Release();
             shadow_screenspace_ps_object = nullptr;
         }
-        if (shadow_terrain_receive_ps_object) {
-            shadow_terrain_receive_ps_object->Release();
-            shadow_terrain_receive_ps_object = nullptr;
-        }
-        if (shadow_terrain_receive_vs_object) {
-            shadow_terrain_receive_vs_object->Release();
-            shadow_terrain_receive_vs_object = nullptr;
-        }
+
         if (shadow_terrain_replay_ps_object) {
             shadow_terrain_replay_ps_object->Release();
             shadow_terrain_replay_ps_object = nullptr;
@@ -1352,7 +1285,6 @@ namespace {
         }
         shadow_preview_format = D3DFMT_UNKNOWN;
         shadow_preview_depth_precision = 8;
-        shadow_preview_depth_sampleable = false;
         shadow_camera_depth_width = 0;
         shadow_camera_depth_height = 0;
     }
@@ -1412,49 +1344,38 @@ namespace {
 
     bool EnsureShadowPreviewResources(IDirect3DDevice9* device)
     {
-
+        const auto gpu_preview = UseGpuTerrainReplay();
         shadow_map_size = kShadowMapSizes[std::clamp(
             shadow_map_size_index, 0, static_cast<int>(kShadowMapSizes.size()) - 1)];
-        if (shadow_map_size_active && shadow_map_size_active != shadow_map_size) {
+        if (shadow_map_size_active
+            && (shadow_map_size_active != shadow_map_size || shadow_preview_gpu_mode != gpu_preview)) {
 
             shadow_preview_failed = false;
             ReleaseShadowPreviewResources();
         }
         if (shadow_preview_failed) return false;
         if (shadow_preview_texture && shadow_preview_surface && shadow_preview_depth
-            && shadow_terrain_replay_vs_object && shadow_terrain_replay_ps_object
-            && shadow_terrain_receive_vs_object && shadow_terrain_receive_ps_object
             && shadow_screenspace_ps_object) {
             return true;
         }
 
         ReleaseShadowPreviewResources();
-        HRESULT result = device->CreateTexture(
-            shadow_map_size, shadow_map_size, 1,
-            D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT,
-            &shadow_preview_texture, nullptr);
-        if (SUCCEEDED(result)) {
-            shadow_preview_format = D3DFMT_A16B16G16R16F;
-            shadow_preview_depth_precision = 10;
-        }
-        else {
+        shadow_preview_gpu_mode = gpu_preview;
+        // Native shadows sample INTZ, so their colour target needs no floating-point precision.
+        const auto formats = gpu_preview
+            ? std::array{D3DFMT_A16B16G16R16F, D3DFMT_R32F, D3DFMT_A8R8G8B8}
+            : std::array{D3DFMT_A8R8G8B8, D3DFMT_A16B16G16R16F, D3DFMT_R32F};
+        auto result = D3DERR_NOTAVAILABLE;
+        for (const auto format : formats) {
             result = device->CreateTexture(
                 shadow_map_size, shadow_map_size, 1,
-                D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT,
+                D3DUSAGE_RENDERTARGET, format, D3DPOOL_DEFAULT,
                 &shadow_preview_texture, nullptr);
             if (SUCCEEDED(result)) {
-                shadow_preview_format = D3DFMT_R32F;
-                shadow_preview_depth_precision = 23;
-            }
-            else {
-                result = device->CreateTexture(
-                    shadow_map_size, shadow_map_size, 1,
-                    D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
-                    D3DPOOL_DEFAULT, &shadow_preview_texture, nullptr);
-                if (SUCCEEDED(result)) {
-                    shadow_preview_format = D3DFMT_A8R8G8B8;
-                    shadow_preview_depth_precision = 8;
-                }
+                shadow_preview_format = format;
+                shadow_preview_depth_precision = format == D3DFMT_A16B16G16R16F ? 10
+                    : format == D3DFMT_R32F ? 23 : 8;
+                break;
             }
         }
         if (SUCCEEDED(result)) {
@@ -1470,7 +1391,6 @@ namespace {
             if (SUCCEEDED(result)) {
                 result = shadow_preview_depth_texture->GetSurfaceLevel(
                     0, &shadow_preview_depth);
-                shadow_preview_depth_sampleable = SUCCEEDED(result);
             }
             if (FAILED(result)) {
                 if (shadow_preview_depth_texture) {
@@ -1483,26 +1403,7 @@ namespace {
                     &shadow_preview_depth, nullptr);
             }
         }
-        if (SUCCEEDED(result)) {
-            result = device->CreateVertexShader(
-                reinterpret_cast<const DWORD*>(&shadow_terrain_replay_vs),
-                &shadow_terrain_replay_vs_object);
-        }
-        if (SUCCEEDED(result)) {
-            result = device->CreatePixelShader(
-                reinterpret_cast<const DWORD*>(&shadow_terrain_replay_ps),
-                &shadow_terrain_replay_ps_object);
-        }
-        if (SUCCEEDED(result)) {
-            result = device->CreateVertexShader(
-                reinterpret_cast<const DWORD*>(&shadow_terrain_receive_vs),
-                &shadow_terrain_receive_vs_object);
-        }
-        if (SUCCEEDED(result)) {
-            result = device->CreatePixelShader(
-                reinterpret_cast<const DWORD*>(&shadow_terrain_receive_ps),
-                &shadow_terrain_receive_ps_object);
-        }
+
         if (SUCCEEDED(result)) {
             result = device->CreatePixelShader(
                 reinterpret_cast<const DWORD*>(&shadow_screenspace_ps),
@@ -1985,41 +1886,16 @@ namespace {
                             backup.model_entry_state.size());
                     }
                 }
-                const auto was_program = shadow_gpu_current_program;
-                const auto was_program_handle = shadow_gpu_current_program_handle;
                 const auto was_terrain = shadow_gpu_current_program_terrain;
-                shadow_gpu_current_program = program;
-                shadow_gpu_current_program_handle = program_handle;
                 shadow_gpu_current_program_terrain = true;
                 GrRenderProgramQueue_Ret(
                     queue, program, renderer_state, mask, flags, draw_lists);
-                shadow_gpu_current_program = was_program;
-                shadow_gpu_current_program_handle = was_program_handle;
                 shadow_gpu_current_program_terrain = was_terrain;
             }
             GW::Hook::LeaveHook();
             return;
         }
-        if (shadow_gpu_capture_active && !shadow_replay_active && program) {
-            const auto batch_index = shadow_program_batch_index++;
-            const auto program_handle =
-                shadow_program_batch_handles && batch_index < shadow_program_batch_count
-                    ? shadow_program_batch_handles[batch_index]
-                    : 0;
-            const auto was_program = shadow_gpu_current_program;
-            const auto was_program_handle = shadow_gpu_current_program_handle;
-            const auto was_terrain = shadow_gpu_current_program_terrain;
-            shadow_gpu_current_program = program;
-            shadow_gpu_current_program_handle = program_handle;
-            shadow_gpu_current_program_terrain = IsTerrainProgram(program_handle);
-            GrRenderProgramQueue_Ret(
-                queue, program, renderer_state, mask, flags, draw_lists);
-            shadow_gpu_current_program = was_program;
-            shadow_gpu_current_program_handle = was_program_handle;
-            shadow_gpu_current_program_terrain = was_terrain;
-            GW::Hook::LeaveHook();
-            return;
-        }
+
         if (shadow_replay_active && program) {
             const ScopedPhase timer(Phase::ProgramQueueHook);
             ++shadow_replay_queue_count;
@@ -2068,32 +1944,6 @@ namespace {
                         backup.model_entry_state.size());
                 }
             }
-            auto* const original_snapshot =
-                *reinterpret_cast<void**>(static_cast<uint8_t*>(program) + 0x78);
-            if (!shadow_original_absolute_snapshot) {
-                shadow_original_absolute_snapshot = original_snapshot;
-            }
-            auto* const shadow_transform_snapshot =
-                terrain_program || original_snapshot == shadow_original_absolute_snapshot
-                    ? shadow_absolute_transform_snapshot
-                    : shadow_relative_transform_snapshot;
-            if (terrain_program) {
-                if (original_snapshot == shadow_original_absolute_snapshot) {
-                    ++shadow_terrain_original_absolute_count;
-                }
-                else {
-                    ++shadow_terrain_original_relative_count;
-                }
-            }
-            if (shadow_transform_snapshot) {
-                auto** const snapshot_slot =
-                    reinterpret_cast<void**>(static_cast<uint8_t*>(program) + 0x78);
-                if (*snapshot_slot != shadow_transform_snapshot) {
-                    program_snapshot_swaps.push_back({snapshot_slot, *snapshot_slot});
-                    *snapshot_slot = shadow_transform_snapshot;
-                    ++shadow_replay_swap_count;
-                }
-            }
             GrRenderProgramQueue_Ret(queue, program, renderer_state, mask, flags, draw_lists);
             shadow_terrain_program_queue_active = was_terrain_program;
             GW::Hook::LeaveHook();
@@ -2134,18 +1984,14 @@ namespace {
         const auto* const saved_batch_handles = shadow_program_batch_handles;
         const auto saved_batch_count = shadow_program_batch_count;
         const auto saved_batch_index = shadow_program_batch_index;
-        const auto saved_gr_call = shadow_gpu_current_gr_call;
         shadow_program_batch_handles = programs;
         shadow_program_batch_count = count;
         shadow_program_batch_index = 0;
-        if (!replaying && !resource_capture && shadow_gpu_capture_active) {
-            shadow_gpu_current_gr_call = gr_program_call_count;
-        }
+
         GrRenderPrograms_Ret(renderer, count, programs, flags);
         shadow_program_batch_handles = saved_batch_handles;
         shadow_program_batch_count = saved_batch_count;
         shadow_program_batch_index = saved_batch_index;
-        shadow_gpu_current_gr_call = saved_gr_call;
         if (!replaying && !resource_capture && gr_program_call_count < gr_program_calls.size()) {
             gr_program_calls[gr_program_call_count++] = {
                 reinterpret_cast<uintptr_t>(_ReturnAddress()),
@@ -2248,43 +2094,38 @@ namespace {
         return result;
     }
 
-    bool ShouldSkipShadowDraw(IDirect3DDevice9* device)
+    struct ShadowDrawState {
+        DWORD depth_write = FALSE;
+        bool guarded = false;
+    };
+
+    bool PrepareShadowDraw(IDirect3DDevice9* device, ShadowDrawState& state)
     {
-        if (!shadow_skip_non_depth_draws || !shadow_replay_active) return false;
-        DWORD z_write = FALSE;
-        device->GetRenderState(D3DRS_ZWRITEENABLE, &z_write);
-        if (z_write) return false;
-        ++shadow_replay_draws_skipped;
+        state = {};
+        if (!shadow_replay_active) return true;
+        DWORD depth_write = FALSE;
+        device->GetRenderState(D3DRS_ZWRITEENABLE, &depth_write);
+        if (!depth_write) {
+            if (shadow_skip_non_depth_draws) {
+                ++shadow_replay_draws_skipped;
+                return false;
+            }
+            return true;
+        }
+        DWORD depth_function = D3DCMP_LESSEQUAL;
+        device->GetRenderState(D3DRS_ZFUNC, &depth_function);
+        if (depth_function == D3DCMP_ALWAYS || depth_function == D3DCMP_NEVER) {
+            state.depth_write = depth_write;
+            state.guarded = true;
+            device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+            ++shadow_replay_depth_wipe_blocked;
+        }
         return true;
     }
 
-    void GuardReplayDepthWrites(IDirect3DDevice9* device)
+    void RestoreReplayDepthWrites(IDirect3DDevice9* device, const ShadowDrawState& state)
     {
-        shadow_replay_depth_guarded_this_draw = false;
-        DWORD z_func = D3DCMP_LESSEQUAL;
-        DWORD z_write = FALSE;
-        DWORD z_enable = D3DZB_FALSE;
-        device->GetRenderState(D3DRS_ZFUNC, &z_func);
-        device->GetRenderState(D3DRS_ZWRITEENABLE, &z_write);
-        device->GetRenderState(D3DRS_ZENABLE, &z_enable);
-        if (z_func < shadow_replay_depth_histogram.size() / 4) {
-            const auto slot = z_func * 4 + (z_write ? 2 : 0)
-                + (z_enable == D3DZB_TRUE ? 1 : 0);
-            ++shadow_replay_depth_histogram[slot];
-        }
-        if (z_func != D3DCMP_ALWAYS && z_func != D3DCMP_NEVER) return;
-        shadow_replay_saved_z_write = z_write;
-        if (!z_write) return;
-        device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
-        shadow_replay_depth_guarded_this_draw = true;
-        ++shadow_replay_depth_wipe_blocked;
-    }
-
-    void RestoreReplayDepthWrites(IDirect3DDevice9* device)
-    {
-        if (!shadow_replay_depth_guarded_this_draw) return;
-        device->SetRenderState(D3DRS_ZWRITEENABLE, shadow_replay_saved_z_write);
-        shadow_replay_depth_guarded_this_draw = false;
+        if (state.guarded) device->SetRenderState(D3DRS_ZWRITEENABLE, state.depth_write);
     }
 
     HRESULT WINAPI OnDrawPrimitive(
@@ -2298,24 +2139,22 @@ namespace {
         else if (shadow_target_redirect_active) {
             ++shadow_builder_draw_count;
         }
-        else {
-        }
-        if (shadow_replay_active && ShouldSkipShadowDraw(device)) {
+        ShadowDrawState state{};
+        if (!PrepareShadowDraw(device, state)) {
             GW::Hook::LeaveHook();
             return D3D_OK;
         }
         HRESULT result;
         if (shadow_replay_active) {
-            GuardReplayDepthWrites(device);
             {
                 const ScopedPhase timer(Phase::ReplayDraws);
                 result = DrawPrimitive_Ret(device, type, start_vertex, primitive_count);
             }
-            RestoreReplayDepthWrites(device);
         }
         else {
             result = DrawPrimitive_Ret(device, type, start_vertex, primitive_count);
         }
+        RestoreReplayDepthWrites(device, state);
         GW::Hook::LeaveHook();
         return result;
     }
@@ -2402,56 +2241,6 @@ namespace {
             static_cast<uint32_t>(captured_terrain_draws.size());
     }
 
-    void CaptureGpuProgramDrawDiagnostic(
-        IDirect3DDevice9* device, const D3DPRIMITIVETYPE type,
-        const UINT vertex_count, const UINT primitive_count)
-    {
-        if (!shadow_gpu_current_program
-            || shadow_gpu_program_draw_count >= shadow_gpu_program_draws.size()) {
-            return;
-        }
-
-        auto& draw = shadow_gpu_program_draws[shadow_gpu_program_draw_count++];
-        draw.gr_call = shadow_gpu_current_gr_call;
-        draw.program_handle = shadow_gpu_current_program_handle;
-        draw.program = reinterpret_cast<uintptr_t>(shadow_gpu_current_program);
-        draw.terrain = shadow_gpu_current_program_terrain;
-        draw.type = type;
-        draw.vertex_count = vertex_count;
-        draw.primitive_count = primitive_count;
-
-        IDirect3DVertexShader9* vertex_shader = nullptr;
-        if (SUCCEEDED(device->GetVertexShader(&vertex_shader)) && vertex_shader) {
-            draw.vertex_shader = reinterpret_cast<uintptr_t>(vertex_shader);
-            vertex_shader->Release();
-        }
-        IDirect3DPixelShader9* pixel_shader = nullptr;
-        if (SUCCEEDED(device->GetPixelShader(&pixel_shader)) && pixel_shader) {
-            draw.pixel_shader = reinterpret_cast<uintptr_t>(pixel_shader);
-            pixel_shader->Release();
-        }
-        IDirect3DVertexDeclaration9* declaration = nullptr;
-        if (SUCCEEDED(device->GetVertexDeclaration(&declaration)) && declaration) {
-            draw.declaration = reinterpret_cast<uintptr_t>(declaration);
-            draw.element_count = static_cast<UINT>(draw.elements.size());
-            if (FAILED(declaration->GetDeclaration(
-                    draw.elements.data(), &draw.element_count))) {
-                draw.element_count = 0;
-            }
-            declaration->Release();
-        }
-        device->GetRenderState(D3DRS_ALPHABLENDENABLE, &draw.alpha_blend);
-        device->GetRenderState(D3DRS_ALPHATESTENABLE, &draw.alpha_test);
-        device->GetRenderState(D3DRS_ALPHAREF, &draw.alpha_ref);
-        device->GetRenderState(D3DRS_SRCBLEND, &draw.src_blend);
-        device->GetRenderState(D3DRS_DESTBLEND, &draw.dest_blend);
-        if (const auto* const model = GrTransformGetCurrent_Func(2)) {
-            std::memcpy(
-                draw.model_transform.data(), model,
-                sizeof(draw.model_transform));
-        }
-    }
-
     void CaptureNativeLightWorldViewProjection(IDirect3DDevice9* device)
     {
         if (shadow_native_light_wvp_ready || !GrTransformGetCurrent_Func) return;
@@ -2533,19 +2322,11 @@ namespace {
     {
         GW::Hook::EnterHook();
         if (shadow_gpu_resource_capture_active) {
-            CaptureGpuProgramDrawDiagnostic(
-                device, type, vertex_count, primitive_count);
             CaptureTerrainDraw(
                 device, type, base_vertex, min_vertex, vertex_count,
                 start_index, primitive_count);
         }
-        else if (shadow_gpu_capture_active) {
-            CaptureGpuProgramDrawDiagnostic(
-                device, type, vertex_count, primitive_count);
-            CaptureTerrainDraw(
-                device, type, base_vertex, min_vertex, vertex_count,
-                start_index, primitive_count);
-        }
+
         if (shadow_replay_active) {
             ++shadow_replay_draw_count;
             CaptureNativeLightWorldViewProjection(device);
@@ -2556,24 +2337,24 @@ namespace {
         else {
             CaptureCameraWorldViewProjection(device);
         }
-        if (shadow_replay_active && ShouldSkipShadowDraw(device)) {
+        ShadowDrawState state{};
+        if (!PrepareShadowDraw(device, state)) {
             GW::Hook::LeaveHook();
             return D3D_OK;
         }
         HRESULT result;
         if (shadow_replay_active) {
-            GuardReplayDepthWrites(device);
             {
                 const ScopedPhase timer(Phase::ReplayDraws);
                 result = DrawIndexedPrimitive_Ret(
                     device, type, base_vertex, min_vertex, vertex_count, start_index, primitive_count);
             }
-            RestoreReplayDepthWrites(device);
         }
         else {
             result = DrawIndexedPrimitive_Ret(
                 device, type, base_vertex, min_vertex, vertex_count, start_index, primitive_count);
         }
+        RestoreReplayDepthWrites(device, state);
         GW::Hook::LeaveHook();
         return result;
     }
@@ -2613,31 +2394,44 @@ namespace {
 
     bool EnsureD3DReplayHooks(IDirect3DDevice9* device)
     {
-        if (!device_hooks.empty()) return true;
+        const auto replay_needed = ShadowMapPassEnabled();
+        if (device_hooks.size() >= (replay_needed ? 6u : 2u)) return true;
         if (hooks_failed || !device) return false;
+        const auto previous_count = device_hooks.size();
         auto* const vtable = *reinterpret_cast<uintptr_t**>(device);
-        SetRenderTarget_Func = reinterpret_cast<SetRenderTarget_pt>(vtable[37]);
-        SetDepthStencilSurface_Func = reinterpret_cast<SetDepthStencilSurface_pt>(vtable[39]);
-        SetRenderState_Func = reinterpret_cast<SetRenderState_pt>(vtable[57]);
-        SetViewport_Func = reinterpret_cast<SetViewport_pt>(vtable[47]);
-        DrawPrimitive_Func = reinterpret_cast<DrawPrimitive_pt>(vtable[81]);
-        DrawIndexedPrimitive_Func = reinterpret_cast<DrawIndexedPrimitive_pt>(vtable[82]);
-        if (!CreateOwnedHook(SetRenderTarget_Func, OnSetRenderTarget, SetRenderTarget_Ret, device_hooks, "SetRenderTarget")
-            || !CreateOwnedHook(SetDepthStencilSurface_Func, OnSetDepthStencilSurface, SetDepthStencilSurface_Ret, device_hooks, "SetDepthStencilSurface")
-            || !CreateOwnedHook(SetRenderState_Func, OnSetRenderState, SetRenderState_Ret, device_hooks, "SetRenderState")
-            || !CreateOwnedHook(SetViewport_Func, OnSetViewport, SetViewport_Ret, device_hooks, "SetViewport")
-            || !CreateOwnedHook(DrawPrimitive_Func, OnDrawPrimitive, DrawPrimitive_Ret, device_hooks, "DrawPrimitive")
-            || !CreateOwnedHook(DrawIndexedPrimitive_Func, OnDrawIndexedPrimitive, DrawIndexedPrimitive_Ret, device_hooks, "DrawIndexedPrimitive")) {
+        auto created = true;
+        if (!previous_count) {
+            SetRenderState_Func = reinterpret_cast<SetRenderState_pt>(vtable[57]);
+            DrawIndexedPrimitive_Func = reinterpret_cast<DrawIndexedPrimitive_pt>(vtable[82]);
+            created = CreateOwnedHook(SetRenderState_Func, OnSetRenderState, SetRenderState_Ret, device_hooks, "SetRenderState")
+                && CreateOwnedHook(DrawIndexedPrimitive_Func, OnDrawIndexedPrimitive, DrawIndexedPrimitive_Ret, device_hooks, "DrawIndexedPrimitive");
+            if (created) {
+                device->GetRenderState(D3DRS_FOGENABLE, &gw_requested_fog_enable);
+                device->GetRenderState(D3DRS_FOGCOLOR, &gw_requested_fog_colour);
+            }
+        }
+        if (created && replay_needed) {
+            SetRenderTarget_Func = reinterpret_cast<SetRenderTarget_pt>(vtable[37]);
+            SetDepthStencilSurface_Func = reinterpret_cast<SetDepthStencilSurface_pt>(vtable[39]);
+            SetViewport_Func = reinterpret_cast<SetViewport_pt>(vtable[47]);
+            DrawPrimitive_Func = reinterpret_cast<DrawPrimitive_pt>(vtable[81]);
+            created = CreateOwnedHook(SetRenderTarget_Func, OnSetRenderTarget, SetRenderTarget_Ret, device_hooks, "SetRenderTarget")
+                && CreateOwnedHook(SetDepthStencilSurface_Func, OnSetDepthStencilSurface, SetDepthStencilSurface_Ret, device_hooks, "SetDepthStencilSurface")
+                && CreateOwnedHook(SetViewport_Func, OnSetViewport, SetViewport_Ret, device_hooks, "SetViewport")
+                && CreateOwnedHook(DrawPrimitive_Func, OnDrawPrimitive, DrawPrimitive_Ret, device_hooks, "DrawPrimitive");
+        }
+        if (!created) {
+            hooks_ready = false;
+            if (previous_count) SyncGwFogState(device);
             for (const auto hook : device_hooks) GW::Hook::RemoveHook(hook);
             device_hooks.clear();
             SetRenderState_Ret = nullptr;
-            hooks_ready = false;
+            DrawIndexedPrimitive_Ret = nullptr;
             hooks_failed = true;
             return false;
         }
-        device->GetRenderState(D3DRS_FOGENABLE, &gw_requested_fog_enable);
-        device->GetRenderState(D3DRS_FOGCOLOR, &gw_requested_fog_colour);
-        for (const auto hook : device_hooks) GW::Hook::EnableHooks(hook);
+        for (auto i = previous_count; i < device_hooks.size(); ++i)
+            GW::Hook::EnableHooks(device_hooks[i]);
         return true;
     }
 
@@ -2648,7 +2442,6 @@ namespace {
         ReleaseCapturedTerrainDraws();
         shadow_gpu_captured_draw_count = 0;
         shadow_gpu_replayed_draw_count = 0;
-        shadow_gpu_program_draw_count = 0;
         if (shadow_terrain_program_handles.empty()) return;
 
         IDirect3DStateBlock9* state_block = nullptr;
@@ -2705,8 +2498,40 @@ namespace {
         state_block->Release();
     }
 
+    bool EnsureTerrainReplayShaders(IDirect3DDevice9* device)
+    {
+        if (shadow_replay_shaders_failed) return false;
+        auto shader_result = D3D_OK;
+        if (!shadow_terrain_replay_vs_object) {
+            shader_result = device->CreateVertexShader(
+                reinterpret_cast<const DWORD*>(&shadow_terrain_replay_vs), &shadow_terrain_replay_vs_object);
+        }
+        if (SUCCEEDED(shader_result) && !shadow_terrain_replay_ps_object) {
+            shader_result = device->CreatePixelShader(
+                reinterpret_cast<const DWORD*>(&shadow_terrain_replay_ps), &shadow_terrain_replay_ps_object);
+        }
+        if (FAILED(shader_result)) {
+            if (shadow_terrain_replay_vs_object) {
+                shadow_terrain_replay_vs_object->Release();
+                shadow_terrain_replay_vs_object = nullptr;
+            }
+            if (shadow_terrain_replay_ps_object) {
+                shadow_terrain_replay_ps_object->Release();
+                shadow_terrain_replay_ps_object = nullptr;
+            }
+            shadow_replay_shaders_failed = true;
+            Log::Error("Weather: GPU terrain preview shaders unavailable (0x%08x)", shader_result);
+            return false;
+        }
+        return true;
+    }
+
     void RenderCapturedTerrainPreview(IDirect3DDevice9* device)
     {
+        if (!EnsureTerrainReplayShaders(device)) {
+            ReleaseCapturedTerrainDraws();
+            return;
+        }
         IDirect3DStateBlock9* state_block = nullptr;
         IDirect3DSurface9* old_target = nullptr;
         IDirect3DSurface9* old_depth = nullptr;
@@ -2960,11 +2785,8 @@ namespace {
                 0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
                 0xffff00ff, 1.0f, 0);
 
-            program_snapshot_swaps.clear();
             program_state_backups.clear();
-            shadow_original_absolute_snapshot = nullptr;
             shadow_replay_queue_count = 0;
-            shadow_replay_swap_count = 0;
             shadow_replay_target_redirects = 0;
             shadow_replay_viewport_redirects = 0;
             shadow_replay_draw_count = 0;
@@ -2977,8 +2799,6 @@ namespace {
             shadow_cell_overrides = 0;
             shadow_objects_not_culled = 0;
             shadow_prop_fades_skipped = 0;
-            shadow_terrain_original_absolute_count = 0;
-            shadow_terrain_original_relative_count = 0;
             shadow_terrain_collect_count = 0;
             shadow_terrain_visibility_override_count = 0;
             shadow_cell_visibility_override_count = 0;
@@ -2989,7 +2809,6 @@ namespace {
             shadow_gpu_light_matrices_ready = false;
             shadow_native_light_wvp_ready = false;
             shadow_replay_depth_wipe_blocked = 0;
-            shadow_replay_depth_histogram.fill(0);
             shadow_replay_draws_skipped = 0;
 
             if (UseShadowLightCamera()) {
@@ -3048,10 +2867,7 @@ namespace {
                 }
                 shadow_replay_active = false;
             }
-            for (auto it = program_snapshot_swaps.rbegin(); it != program_snapshot_swaps.rend(); ++it) {
-                *it->slot = it->original;
-            }
-            program_snapshot_swaps.clear();
+
             for (auto& backup : program_state_backups) {
                 if (!backup.model_entry_state.empty()) {
                     std::memcpy(
@@ -3088,15 +2904,7 @@ namespace {
                     static_cast<int>(slot), saved_transforms[slot].data());
             }
         }
-        if (shadow_absolute_transform_snapshot) {
-            GrTransformSnapshotRelease_Func(shadow_absolute_transform_snapshot);
-        }
-        if (shadow_relative_transform_snapshot) {
-            GrTransformSnapshotRelease_Func(shadow_relative_transform_snapshot);
-        }
-        shadow_absolute_transform_snapshot = nullptr;
-        shadow_relative_transform_snapshot = nullptr;
-        shadow_original_absolute_snapshot = nullptr;
+
         shadow_replay_active = false;
         shadow_target_redirect_active = false;
         shadow_allow_auxiliary_targets = false;
@@ -3104,81 +2912,6 @@ namespace {
         shadow_original_main_depth = nullptr;
         shadow_scene_rebuild_active = false;
         shadow_explicit_camera_render_active = false;
-    }
-
-    void DrawCapturedTerrainShadows(IDirect3DDevice9* device)
-    {
-        auto* const shadow_map = shadow_preview_texture;
-        if (!shadow_gpu_draw_shadows || !shadow_gpu_light_matrices_ready
-            || captured_terrain_draws.empty() || !shadow_map) {
-            ReleaseCapturedTerrainDraws();
-            return;
-        }
-
-        IDirect3DStateBlock9* state_block = nullptr;
-        if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state_block))
-            || FAILED(state_block->Capture())) {
-            if (state_block) state_block->Release();
-            ReleaseCapturedTerrainDraws();
-            return;
-        }
-
-        device->SetVertexShader(shadow_terrain_receive_vs_object);
-        device->SetPixelShader(shadow_terrain_receive_ps_object);
-        if (!GameWorldCompositor::SetWorldViewProj(device)) {
-            state_block->Apply();
-            state_block->Release();
-            ReleaseCapturedTerrainDraws();
-            return;
-        }
-        device->SetVertexShaderConstantF(
-            8, reinterpret_cast<const float*>(&shadow_gpu_light_view), 4);
-        device->SetVertexShaderConstantF(
-            12, reinterpret_cast<const float*>(&shadow_gpu_light_projection), 4);
-        const float settings[4] = {
-            shadow_gpu_bias, shadow_gpu_strength,
-            1.0f / static_cast<float>(shadow_map_size),
-            shadow_gpu_slope_bias};
-        device->SetPixelShaderConstantF(0, settings, 1);
-        device->SetTexture(0, shadow_map);
-        device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
-        device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
-        device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
-        device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-        device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
-
-        device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
-        device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
-        device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
-        device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-        device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
-        device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
-        device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
-        device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
-        device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
-        device->SetRenderState(D3DRS_FOGENABLE, FALSE);
-        device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
-        device->SetRenderState(D3DRS_COLORWRITEENABLE, 0xf);
-        device->SetRenderState(
-            D3DRS_DEPTHBIAS, std::bit_cast<DWORD>(-0.00001f));
-
-        for (const auto& draw : captured_terrain_draws) {
-            device->SetVertexDeclaration(draw.declaration);
-            for (UINT stream_index = 0; stream_index < draw.streams.size(); ++stream_index) {
-                const auto& stream = draw.streams[stream_index];
-                if (!stream.buffer) continue;
-                device->SetStreamSource(
-                    stream_index, stream.buffer, stream.offset, stream.stride);
-                device->SetStreamSourceFreq(stream_index, stream.frequency);
-            }
-            device->SetIndices(draw.indices);
-            device->DrawIndexedPrimitive(
-                draw.type, draw.base_vertex, draw.min_vertex,
-                draw.vertex_count, draw.start_index, draw.primitive_count);
-        }
-
-        state_block->Apply();
-        state_block->Release();
     }
 
     bool EnsureCameraDepthTexture(
@@ -3191,9 +2924,6 @@ namespace {
         auto surface_height = height;
         if (SUCCEEDED(device->GetDepthStencilSurface(&depth_surface)) && depth_surface) {
             if (SUCCEEDED(depth_surface->GetDesc(&depth_desc))) {
-                shadow_depth_surface_format = depth_desc.Format;
-                shadow_depth_surface_msaa = depth_desc.MultiSampleType;
-                shadow_depth_surface_msaa_quality = depth_desc.MultiSampleQuality;
                 if (depth_desc.Width > 0 && depth_desc.Height > 0) {
                     surface_width = depth_desc.Width;
                     surface_height = depth_desc.Height;
@@ -3201,8 +2931,6 @@ namespace {
             }
             depth_surface->Release();
         }
-        shadow_depth_surface_width = surface_width;
-        shadow_depth_surface_height = surface_height;
 
         if (shadow_camera_depth_texture
             && shadow_camera_depth_width == surface_width
@@ -3224,16 +2952,6 @@ namespace {
         }
         shadow_camera_depth_width = surface_width;
         shadow_camera_depth_height = surface_height;
-        IDirect3D9* d3d = nullptr;
-        if (SUCCEEDED(device->GetDirect3D(&d3d)) && d3d) {
-            D3DDEVICE_CREATION_PARAMETERS params{};
-            device->GetCreationParameters(&params);
-            shadow_camera_depth_resz_supported = SUCCEEDED(d3d->CheckDeviceFormat(
-                params.AdapterOrdinal, params.DeviceType, D3DFMT_X8R8G8B8,
-                D3DUSAGE_RENDERTARGET, D3DRTYPE_SURFACE,
-                static_cast<D3DFORMAT>(MAKEFOURCC('R', 'E', 'S', 'Z'))));
-            d3d->Release();
-        }
         return true;
     }
 
@@ -3246,23 +2964,6 @@ namespace {
             return false;
         }
 
-        shadow_reported_viewport_width = width;
-        shadow_reported_viewport_height = height;
-        shadow_render_target_width = 0;
-        shadow_render_target_height = 0;
-        if (IDirect3DSurface9* render_target = nullptr;
-            SUCCEEDED(device->GetRenderTarget(0, &render_target)) && render_target) {
-            if (D3DSURFACE_DESC rt_desc{}; SUCCEEDED(render_target->GetDesc(&rt_desc))) {
-                shadow_render_target_width = rt_desc.Width;
-                shadow_render_target_height = rt_desc.Height;
-                shadow_render_target_format = rt_desc.Format;
-                shadow_render_target_msaa = rt_desc.MultiSampleType;
-                shadow_render_target_msaa_quality = rt_desc.MultiSampleQuality;
-            }
-            render_target->Release();
-        }
-        shadow_device_viewport_valid =
-            SUCCEEDED(device->GetViewport(&shadow_device_viewport));
         IDirect3DStateBlock9* state_block = nullptr;
         if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state_block))
             || FAILED(state_block->Capture())) {
@@ -4736,9 +4437,9 @@ static void DrawShadowReplay(IDirect3DDevice9* device)
     shadow_trigger_scene_list_caller = 0;
     shadow_camera_depth_copy_succeeded = false;
     shadow_screenspace_draw_count = 0;
-    if (ShadowMapPassEnabled() && device) {
-        EnsureShadowPreviewResources(device);
-        EnsureD3DReplayHooks(device);
+    if (IsEnabled() && device) {
+        if (!EnsureD3DReplayHooks(device)) return;
+        if (ShadowMapPassEnabled()) EnsureShadowPreviewResources(device);
     }
 
     RefreshWaterProgramHandles();
@@ -4746,8 +4447,7 @@ static void DrawShadowReplay(IDirect3DDevice9* device)
 
 void Skybox::Initialize()
 {
-    if (hooks_ready || !engine_hooks.empty()) return;
-    hooks_failed = false;
+    if (hooks_ready || hooks_failed || !engine_hooks.empty()) return;
     const auto bindings = GW::Render::GetWorldRenderBindings();
     if (!bindings) {
         hooks_failed = true;
@@ -4765,7 +4465,6 @@ void Skybox::Initialize()
     BIND_WORLD_FUNCTION(GrTransformOrthographic);
     BIND_WORLD_FUNCTION(GrTransformGetCurrent);
     BIND_WORLD_FUNCTION(GrTransformSetCurrent);
-    BIND_WORLD_FUNCTION(GrTransformSnapshotRelease);
     BIND_WORLD_FUNCTION(GrRenderSceneLists);
     BIND_WORLD_FUNCTION(GmViewBuildSceneLists);
     BIND_WORLD_FUNCTION(GmWorldUpdateView);
@@ -5176,6 +4875,9 @@ namespace {
         ImGui::Combo(
             "Shadow map size", &shadow_map_size_index,
             "256 x 256\0" "512 x 512\0" "1024 x 1024\0" "2048 x 2048\0" "4096 x 4096\0");
+        const auto colour_bytes = shadow_preview_format == D3DFMT_A16B16G16R16F ? 8u : 4u;
+        const auto target_bytes = static_cast<uint64_t>(shadow_map_size_active) * shadow_map_size_active * (colour_bytes + 4u);
+        ImGui::TextDisabled("Shadow colour + depth targets: %.0f MiB", static_cast<double>(target_bytes) / (1024.0 * 1024.0));
         {
 
             const auto coverage = std::max(shadow_light_camera_radius * 2.0f, 1.0f);
@@ -5346,6 +5048,9 @@ namespace {
     {
         ImGui::Checkbox("Shadow-map replay preview", &shadow_replay_preview);
         if (!shadow_replay_preview) return;
+        if (shadow_replay_shaders_failed) {
+            ImGui::TextColored(kWarn, "GPU replay shaders unavailable; toggle GPU terrain replay or reset the device to retry.");
+        }
 
         ImGui::Checkbox("Debug replay from light camera", &shadow_replay_light_camera);
         ImGui::Checkbox("Replay terrain only", &shadow_replay_terrain_only);
@@ -5371,9 +5076,8 @@ namespace {
 
         ImGui::Separator();
         ImGui::Text(
-            "Renderer %u, programs %u, queued %u, swaps %u",
-            shadow_replay_renderer, shadow_replay_program_count, shadow_replay_queue_count,
-            shadow_replay_swap_count);
+            "Renderer %u, programs %u, queued %u",
+            shadow_replay_renderer, shadow_replay_program_count, shadow_replay_queue_count);
         ImGui::Text(
             "RT redirects %u, builder draws %u, replay draws %u",
             shadow_replay_target_redirects, shadow_builder_draw_count, shadow_replay_draw_count);
@@ -5383,7 +5087,6 @@ namespace {
         ImGui::Text(
             "Primary caster programs %u, baked tiles voided %u",
             shadow_primary_program_count, shadow_baked_tiles_voided);
-        ImGui::Text("GPU program draws diagnosed %u", shadow_gpu_program_draw_count);
         ImGui::Text(
             "Terrain collectors %u, mask overrides %u",
             shadow_terrain_collect_count, shadow_terrain_visibility_override_count);
@@ -5391,9 +5094,6 @@ namespace {
             "Terrain handles %u, queues %u, cull bypasses %u",
             static_cast<uint32_t>(shadow_terrain_program_handles.size()),
             shadow_terrain_queue_count, shadow_terrain_cull_bypass_count);
-        ImGui::Text(
-            "Terrain original snapshots: absolute %u, other %u",
-            shadow_terrain_original_absolute_count, shadow_terrain_original_relative_count);
         ImGui::Separator();
         if (!shadow_camera_depth_copy_succeeded) {
             ImGui::TextColored(
@@ -5565,6 +5265,7 @@ namespace {
 
 void Skybox::DrawSettings()
 {
+    ImGui::TextDisabled("Atmosphere hooks: %zu game, %zu device", engine_hooks.size(), device_hooks.size());
     if (hooks_failed) {
         ImGui::TextColored(kWarn, "Atmosphere unavailable; check the Toolbox log. Disable and re-enable Weather after resolving the error.");
     }
@@ -5700,4 +5401,5 @@ void Skybox::Terminate()
     if (sky_decl) { sky_decl->Release(); sky_decl = nullptr; }
     InvalidateDeviceResources();
     resources_failed = false;
+    hooks_failed = false;
 }

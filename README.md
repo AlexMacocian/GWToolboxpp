@@ -122,6 +122,18 @@ session-only. Unload standalone Rebirth before testing this port. Rezone when co
 baked terrain shadows: tiles already streamed with cleared shadows cannot be restored
 by toggling the effect off.
 
+Particle-only Weather does not initialize the atmosphere's game hooks. Opting in
+adds the lighting/depth hooks; the extra device interception needed for shadow
+replay is installed only when a shadow pass is requested. Once installed, hooks
+remain owned until Weather is disabled, so another module cannot take their slots
+between master-switch toggles.
+
+Normal shadows keep the same INTZ depth target and native caster pipeline, but
+use a 32-bit RGBA8 colour preview target instead of an HDR target. At 4096² this saves
+64 MiB of render-target memory on supported devices. Experimental GPU terrain
+preview retains its high-precision targets and creates its shaders on demand.
+Retired receive shaders and write-only replay dumps are no longer allocated.
+
 Local xwin builds write crash dumps even when the updater considers the build outdated
 or plugins are loaded. Keep the matching `bin/GWToolboxdll.pdb` with your test DLL.
 Release builds retain the normal reporting restrictions; pass
