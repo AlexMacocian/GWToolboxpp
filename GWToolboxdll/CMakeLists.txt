@@ -148,6 +148,10 @@ file(GLOB SOURCES CONFIGURE_DEPENDS
     "Constants/*.cpp"
     "Modules/*.h"
     "Modules/*.cpp"
+    "Modules/Weather/*.h"
+    "Modules/Weather/*.cpp"
+    "Modules/Weather/Effects/*.h"
+    "Modules/Weather/Effects/*.cpp"
     "Utils/*.h"
     "Utils/*.cpp"
     "Utils/*.ixx"
@@ -166,6 +170,12 @@ file(GLOB SOURCES CONFIGURE_DEPENDS
     
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${SOURCES})
 target_sources(GWToolboxdll PRIVATE ${SOURCES})
+
+option(GWTOOLBOX_ALLOW_UNSUPPORTED_CRASH_DUMPS "Write local crash dumps for development builds and plugin sessions" OFF)
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/Modules/CrashHandler.cpp" APPEND PROPERTY
+    COMPILE_DEFINITIONS "GWTOOLBOX_ALLOW_UNSUPPORTED_CRASH_DUMPS=$<BOOL:${GWTOOLBOX_ALLOW_UNSUPPORTED_CRASH_DUMPS}>")
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/Modules/CrashHandler.cpp"
+    PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
 
 # Wasm/*.cpp is the Emscripten-only mod_init scaffold (see Wasm/main_wasm.cpp) --
 # never compiled into this native target (uses GLES3/emscripten_sleep, not part of
@@ -316,13 +326,15 @@ target_link_libraries(GWToolboxdll PRIVATE
 	delayimp # for delay loading gwca
     )
 
-# Only 1.19 has actually been validated against these shaders; 1.6 (the version most
-# distros still package) miscompiles them. Raise the floor, never lower it, without testing.
-set(VKD3D_MINIMUM_VERSION 1.19)
+set(VKD3D_MINIMUM_VERSION 2.0)
 
 file(GLOB FXC_PATHS "C:/Program Files (x86)/Windows Kits/10/bin/*/x86")
 find_program(FXC fxc DOC "hlsl compiler" PATHS ${FXC_PATHS})
-if(FXC)
+if(FXC AND NOT CMAKE_HOST_WIN32 AND FXC MATCHES "\\.[Ee][Xx][Ee]$")
+    find_program(WINE_EXECUTABLE wine REQUIRED)
+    message(STATUS "HLSL: using fxc through Wine (shader compilation only; C++ remains native)")
+    set(HLSL_COMPILE_COMMAND ${Python3_EXECUTABLE} "${PROJECT_SOURCE_DIR}/tools/hlsl_compile.py" --fxc ${FXC})
+elseif(FXC)
     set(HLSL_COMPILE_COMMAND ${FXC})
 else()
     # No fxc: fall back to vkd3d-shader, the only non-Windows HLSL compiler that emits
@@ -336,7 +348,6 @@ else()
     else()
         execute_process(COMMAND ${VKD3D_COMPILER} --version OUTPUT_VARIABLE VKD3D_VERSION_OUTPUT ERROR_QUIET)
         string(REGEX MATCH "vkd3d-shader ([0-9]+\\.[0-9]+)" _ "${VKD3D_VERSION_OUTPUT}")
-        # Older releases silently miscompile these shaders ("Unhandled instruction type HLSL_IR_JUMP").
         if(CMAKE_MATCH_1 VERSION_LESS ${VKD3D_MINIMUM_VERSION})
             message(SEND_ERROR "vkd3d-compiler ${CMAKE_MATCH_1} is too old for SM3 HLSL; need ${VKD3D_MINIMUM_VERSION}+")
         endif()
@@ -351,6 +362,9 @@ file(GLOB HLSL_VERTEX_SHADER_FILES CONFIGURE_DEPENDS
 file(GLOB HLSL_PIXEL_SHADER_FILES CONFIGURE_DEPENDS
     Widgets/Minimap/Shaders/*_ps.hlsl
 )
+file(GLOB HLSL_INCLUDE_FILES CONFIGURE_DEPENDS
+    Widgets/Minimap/Shaders/*.hlsli
+)
 
 set_source_files_properties(${HLSL_VERTEX_SHADER_FILES} PROPERTIES ShaderType "vs")
 set_source_files_properties(${HLSL_PIXEL_SHADER_FILES} PROPERTIES ShaderType "ps")
@@ -363,6 +377,7 @@ foreach(FILE ${HLSL_VERTEX_SHADER_FILES} ${HLSL_PIXEL_SHADER_FILES})
   add_custom_command(OUTPUT ${OUTPUT_FILE}
                      COMMAND ${HLSL_COMPILE_COMMAND} /nologo /E main /T ${shadertype}_3_0 /Vn ${FILE_NOEXT} /O3 /Zi /Fh ${OUTPUT_FILE} ${FILE}
                      MAIN_DEPENDENCY ${FILE}
+                     DEPENDS ${HLSL_INCLUDE_FILES} "${PROJECT_SOURCE_DIR}/tools/hlsl_compile.py"
                      COMMENT "HLSL ${FILE}"
                      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                      VERBATIM)

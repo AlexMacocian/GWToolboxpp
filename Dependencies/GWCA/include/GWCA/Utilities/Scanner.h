@@ -2,6 +2,7 @@
 
 #include "Export.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@ namespace GW {
         // Initializer to determine scan range.
         GWCA_API void Initialize(const char* moduleName = NULL);
         GWCA_API void Initialize(HMODULE hModule);
+        GWCA_API bool IsInitialized();
 
         GWCA_API DWORD GetGameTlsIndex();
 
@@ -56,6 +58,21 @@ namespace GW {
 
         GWCA_API uintptr_t ToFunctionStart(uintptr_t call_instruction_address, uint32_t scan_range = 0xff);
 
+#if !GWCA_WASM
+        // Checks section bounds and current page permissions for the complete native range.
+        GWCA_API bool IsAccessible(uintptr_t address, size_t length, ScannerSection section = ScannerSection::Section_DATA);
+
+        GWCA_API uintptr_t FindUnique(const char* pattern, const char* mask = nullptr, ScannerSection section = ScannerSection::Section_TEXT);
+        GWCA_API uintptr_t FindCallee(uintptr_t caller, uint32_t offset, const char* prologue, const char* mask = nullptr);
+        GWCA_API uintptr_t ReadGlobalAddress(uintptr_t operand, size_t size, size_t alignment, uint32_t subtract = 0);
+
+        template<typename T>
+        T* ReadGlobal(uintptr_t operand, uint32_t subtract = 0)
+        {
+            return reinterpret_cast<T*>(ReadGlobalAddress(operand, sizeof(T), alignof(T), subtract));
+        }
+#endif
+
 #if GWCA_WASM
         // Every scan returns an address, as on x86 -- here a tagged CODE OFFSET
         // (0x80000000 | offset) rather than a linear one. FunctionAtCodeOffset is the one
@@ -64,7 +81,6 @@ namespace GW {
 
         // Initialise from the module bytes -- a running module cannot read its own code section.
         GWCA_API bool Initialize(const void* wasm_bytes, size_t length);
-        GWCA_API bool IsInitialized();
 
         // Scans with no wasm equivalent record what they were asked for rather than failing silently.
         GWCA_API const std::vector<std::string>& GetUnportedScans();

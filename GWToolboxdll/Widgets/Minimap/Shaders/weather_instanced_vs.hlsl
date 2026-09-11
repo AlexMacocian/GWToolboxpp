@@ -1,29 +1,30 @@
 // Instanced world-space billboard. Stream 0 is a static unit quad (corner sign in xy, uv in zw);
-// stream 1 is one per-drop record (world centre + the two half-extent axes). The quad is expanded on
-// the GPU, so the CPU uploads ~36 bytes per drop instead of building four textured vertices. Output
-// matches weather_billboard_vs so the same pixel shader (distance fade) is reused.
+// stream 1 is one per-particle record (world centre + an alpha). The quad is expanded on the GPU,
+// so the CPU uploads 16 bytes per particle instead of four textured vertices. The output matches
+// weather_billboard_vs so both share the same pixel shader.
 float4x4 view_matrix : register(c0);
 float4x4 proj_matrix : register(c4);
-float4 tint : register(c8);   // condition tint (rgba), constant per draw - all of a draw's particles share it
-float4 flags : register(c9);  // x = flip texture V (rain streak runs along the downward velocity)
-float4 axis_x : register(c10); // billboard half-extent axes, constant per draw (xyz used; was per-instance)
+float4 tint : register(c8);    // condition tint (rgba), constant per draw
+float4 flags : register(c9);   // x = flip texture V (a rain streak runs along its velocity)
+float4 axis_x : register(c10); // billboard half-extent axes, constant per draw
 float4 axis_y : register(c11);
 
 struct VS_INPUT {
-    float2 corner : POSITION;   // stream 0: -1/+1 per corner
-    float2 uv : TEXCOORD0;      // stream 0
-    float3 center : TEXCOORD1;  // stream 1 (per instance): world centre
-    float alpha : TEXCOORD2;    // stream 1: per-instance alpha multiplier (1 for flakes, fade for settle)
+    float2 corner : POSITION;  // stream 0: -1/+1 per corner
+    float2 uv : TEXCOORD0;     // stream 0
+    float3 center : TEXCOORD1; // stream 1, per instance: world centre
+    float alpha : TEXCOORD2;   // stream 1: per-instance alpha (1 for flakes, fade for settles)
 };
 
 struct VS_OUTPUT {
-    float4 position : SV_POSITION;
+    float4 position : POSITION;
     float4 color : COLOR;
     float2 uv : TEXCOORD0;
     float4 world : TEXCOORD1;
 };
 
-VS_OUTPUT main(VS_INPUT input) {
+VS_OUTPUT main(VS_INPUT input)
+{
     float3 world = input.center + input.corner.x * axis_x.xyz + input.corner.y * axis_y.xyz;
     VS_OUTPUT output;
     output.color = float4(tint.rgb, tint.a * input.alpha);

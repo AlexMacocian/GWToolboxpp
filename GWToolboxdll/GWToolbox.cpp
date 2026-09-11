@@ -45,6 +45,8 @@
 #include <Modules/ToolboxTheme.h>
 #include <Modules/TransmoModule.h>
 #include <Modules/Updater.h>
+#include <Modules/WeatherModule.h>
+#include <Modules/Weather/Skybox.h>
 #include <Windows/SettingsWindow.h>
 
 #include <Widgets/Minimap/Minimap.h>
@@ -192,6 +194,7 @@ namespace {
         ImGui_ImplWin32_Init(GW::MemoryMgr::GetGWWindowHandle());
 
         GW::Render::SetResetCallback([](IDirect3DDevice9*) {
+            WeatherModule::InvalidateDeviceResources();
             ImGui_ImplDX9_InvalidateDeviceObjects();
         });
 
@@ -1010,6 +1013,7 @@ void GWToolbox::Enable()
 void GWToolbox::Disable()
 {
     if (gwtoolbox_disabled) return;
+    Skybox::SyncMasterSwitch(GW::Render::GetDevice());
     GW::DisableHooks();
     GW::Render::EnableHooks();
     if (OnUiRoot_UICallback_Func) GW::Hook::EnableHooks(OnUiRoot_UICallback_Func);
@@ -1125,6 +1129,7 @@ void GWToolbox::Draw(IDirect3DDevice9* device)
 
     Resources::DxUpdate(device);
 
+    Skybox::SyncMasterSwitch(device);
     can_render_toolbox = CanRenderToolbox();
     if (!can_render_toolbox) return;
 

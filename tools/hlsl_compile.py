@@ -3,7 +3,7 @@
 
 fxc.exe is the only Microsoft compiler that still emits d3dbc (shader model 1-3)
 bytecode, and it is a Windows binary -- so a Linux build would otherwise need wine
-purely for the twelve small SM3 shaders under GWToolboxdll/Widgets/Minimap/Shaders.
+purely for SM3 shaders.
 dxc is not an alternative: it dropped every profile below SM6.
 
 vkd3d-shader (wine's own HLSL compiler, usable as a native Linux library) does target
@@ -21,13 +21,16 @@ ignored and the emitted bytecode is longer than fxc's. Register allocation is
 unaffected (explicit `register(cN)` bindings are honoured, and vkd3d places its own
 literals after them), which is what the renderer's hardcoded SetVertexShaderConstantF
 indices actually depend on.
+
+--fxc selects Microsoft's fxc.exe through Wine for unsupported SM3 instructions.
+This affects shaders only, not C++ compilation or linking.
 """
 
 import argparse
 import os
 import subprocess
 import sys
-import tempfile
+from pathlib import Path
 
 BYTES_PER_ROW = 12
 VALUELESS_FXC_FLAGS = {"/nologo", "/Od", "/O0", "/O1", "/O2", "/O3", "/Zi", "/Zpr", "/Zpc"}
@@ -62,6 +65,7 @@ def parse_fxc_arguments(argv):
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--vkd3d-compiler", default=os.environ.get("VKD3D_COMPILER", "vkd3d-compiler"))
+    parser.add_argument("--fxc")
     options, fxc_argv = parser.parse_known_args()
 
     entry, profile, variable, output, source = parse_fxc_arguments(fxc_argv)
@@ -69,20 +73,35 @@ def main():
     if missing:
         sys.exit(f"hlsl_compile: missing required argument(s): {', '.join(missing)}")
 
-    bytecode_fd, bytecode_path = tempfile.mkstemp(suffix=".bin")
-    os.close(bytecode_fd)
-    try:
-        result = subprocess.run(
-            [options.vkd3d_compiler, "-x", "hlsl", "-p", profile, "-b", "d3dbc",
-             "-e", entry, "-o", bytecode_path, source],
-            capture_output=True, text=True)
-        if result.returncode:
-            sys.stderr.write(result.stdout + result.stderr)
-            sys.exit(result.returncode)
-        with open(bytecode_path, "rb") as bytecode_file:
-            bytecode = bytecode_file.read()
-    finally:
-        os.unlink(bytecode_path)
+    source_argument = source
+    source = Path(source).resolve()
+    if options.fxc:
+        environment = os.environ.copy()
+        environment.setdefault("WINEDEBUG", "-all")
+        environment.setdefault("WINEPREFIX", str(Path(__file__).resolve().parent.parent / ".xwin-toolchain/wine-shaders"))
+        command = ["wine", str(Path(options.fxc).resolve())]
+        for argument in fxc_argv:
+            if argument == output:
+                command.append(os.path.relpath(Path(output).resolve(), source.parent).replace(os.sep, "\\"))
+            elif argument == source_argument:
+                command.append(source.name)
+            else:
+                command.append(argument)
+        sys.exit(subprocess.run(command, cwd=source.parent, env=environment).returncode)
+
+    compiler = options.vkd3d_compiler
+    if os.path.dirname(compiler):
+        compiler = str(Path(compiler).resolve())
+    result = subprocess.run(
+        [compiler, "-x", "hlsl", "-p", profile, "-b", "d3dbc",
+         "-e", entry, "-o", "-", str(source)],
+        cwd=source.parent, capture_output=True)
+    if result.returncode:
+        sys.stderr.write((result.stdout + result.stderr).decode("utf-8", errors="replace"))
+        sys.exit(result.returncode)
+    if result.stderr:
+        sys.stderr.write(result.stderr.decode("utf-8", errors="replace"))
+    bytecode = result.stdout
 
     if not bytecode:
         sys.exit(f"hlsl_compile: {options.vkd3d_compiler} produced no output for {source}")

@@ -2,60 +2,59 @@
 
 #include <DirectXMath.h>
 
+#include <GWCA/Constants/Constants.h>
+#include <GWCA/Managers/MapMgr.h>
 #include <GWCA/GameEntities/Camera.h>
 #include <GWCA/Managers/CameraMgr.h>
 #include <GWCA/Managers/RenderMgr.h>
+#include <GWCA/Managers/WorldRenderMgr.h>
 #include <GWCA/Managers/UIMgr.h>
 #include <GWCA/GameContainers/Array.h>
 #include <GWCA/Utilities/Hooker.h>
-#include <GWCA/Utilities/Scanner.h>
 
 #include <GWToolbox.h>
 #include <Timer.h>
 #include <Utils/GameWorldCompositor.h>
 
-// The shared world shaders live with the original in-game renderer; both consumers use them.
 #include "Widgets/Minimap/Shaders/game_world_renderer_vs.h"
 #include "Widgets/Minimap/Shaders/game_world_renderer_dotted_ps.h"
 
 namespace {
+
     enum FrCacheEntryType : uint32_t {
         FRCACHE_GPU_RENDER = 0,
         FRCACHE_FRAME_CALLBACK = 1,
         FRCACHE_CLIENT_VIEWPORT = 2,
         FRCACHE_FRAME_VIEWPORT = 3,
     };
-    struct FrCacheBufferEntry {
-        FrCacheEntryType type;
-        uint32_t index;
-        uint32_t param;
-    };
-
-    struct FrameRenderContext {
-        GW::Array<GW::UI::Frame*> render_frame_list;
-        GW::Array<GW::UI::Frame*> frame_array;
-        GW::Array<void*> cached_resource_ids;
-        GW::Array<FrCacheBufferEntry> render_buffer;
-    };
-    static_assert(sizeof(FrameRenderContext) == 0x40);
-
-    using FrCacheRenderFn = void(__cdecl*)(uint32_t, uint32_t);
+    using FrCacheBufferEntry = GW::Render::RenderBufferEntry;
+    using FrCacheRenderFn = decltype(GW::Render::FrameRenderBindings::FrCacheRenderAll);
     FrCacheRenderFn FrCacheRenderAll_Func = nullptr;
     FrCacheRenderFn FrCacheRenderAll_Ret = nullptr;
-    FrameRenderContext* frame_render_context = nullptr;
+    GW::Array<FrCacheBufferEntry>* render_buffer = nullptr;
+    GW::Array<void*>* frame_array = nullptr;
+    GW::Array<uint32_t>* render_programs = nullptr;
+    const uint32_t* active_world_programs = nullptr;
+    uint32_t active_world_program_count = 0;
+    uint32_t active_world_renderer = 0;
     bool compositor_scanned = false;
     bool compositor_failed = false;
     bool compositor_hooked = false;
-    bool drawn_this_frame = false; // guard: draw only in the first world pass per frame
+    bool drawn_this_frame = false;
+    uint64_t frame_id = 0;
 #ifdef _DEBUG
-    int dump_calls_remaining = 0; // harness `frcache` diagnostics: log buffer layout for the next N calls
+    int dump_calls_remaining = 0;
 #endif
 
-    // Registered overlay draws, invoked in registration order between world and HUD.
-    std::vector<std::pair<int, GameWorldCompositor::DrawCallback>> callbacks;
+    struct DrawRegistration {
+        int token;
+        int priority;
+        GameWorldCompositor::DrawCallback callback;
+    };
+    std::vector<DrawRegistration> callbacks;
+    std::vector<std::pair<int, GameWorldCompositor::DrawCallback>> pre_world_callbacks;
     int next_token = 1;
 
-    // === shared world-draw pipeline ===
     IDirect3DVertexShader9* vshader = nullptr;
     IDirect3DPixelShader9* pshader = nullptr;
     IDirect3DVertexDeclaration9* vertex_declaration = nullptr;
@@ -63,82 +62,126 @@ namespace {
 
     void RunCallbacks(IDirect3DDevice9* device)
     {
-        const bool profiling = GWToolbox::IsProfilingEnabled(); // [perf-diag] gate on the profiling toggle
+        const auto profiling = GWToolbox::IsProfilingEnabled();
         for (auto& entry : callbacks) {
-            if (!entry.second) continue;
+            if (!entry.callback) continue;
+            const auto cb_timer = profiling ? TIMER_INIT() : 0;
+            entry.callback(device);
             if (profiling) {
-                const auto cb_timer = TIMER_INIT();
-                entry.second(device);
                 const auto cb_ms = TIMER_DIFF(cb_timer);
-                if (cb_ms > 60) Log::Log("[hitch] compositor callback token=%d took %ld ms", entry.first, (long)cb_ms);
-            }
-            else {
-                entry.second(device);
+                if (cb_ms > 60) Log::Log("[hitch] compositor callback token=%d took %ld ms", entry.token, static_cast<long>(cb_ms));
             }
         }
     }
 
-    bool ScanCompositor()
+    void RunPreWorldCallbacks(IDirect3DDevice9* device)
     {
-
+        for (auto& entry : pre_world_callbacks) {
+            if (entry.second) entry.second(device);
+        }
     }
 
-    void __cdecl OnFrCacheRenderAll(uint32_t param_1, uint32_t param_2)
+    void SetActiveWorldPrograms(
+        const uint32_t first_gpu_index, const uint32_t world_program_count, const uint32_t renderer)
+    {
+        active_world_programs = nullptr;
+        active_world_program_count = 0;
+        active_world_renderer = renderer;
+        if (!render_programs || first_gpu_index > render_programs->size()
+            || world_program_count > render_programs->size() - first_gpu_index) {
+            return;
+        }
+        active_world_programs = render_programs->begin() + first_gpu_index;
+        active_world_program_count = world_program_count;
+    }
+
+    bool ScanCompositor()
+    {
+        if (compositor_scanned) return !compositor_failed;
+        compositor_scanned = true;
+
+        const auto bindings = GW::Render::GetFrameRenderBindings();
+        if (!bindings) {
+            compositor_failed = true;
+            Log::Error("In-world renderer: FrCache context was not found; overlays are disabled.");
+            return false;
+        }
+        const auto context = bindings->frame_context;
+        frame_array = &context->frame_array;
+        render_programs = &context->render_programs;
+        render_buffer = &context->render_buffer;
+        FrCacheRenderAll_Func = bindings->FrCacheRenderAll;
+        return true;
+    }
+
+    void __cdecl OnFrCacheRenderAll(uint32_t render_target, float delta_time)
     {
         GW::Hook::EnterHook();
         IDirect3DDevice9* device = GW::Render::GetDevice();
 
 #ifdef _DEBUG
-        if (dump_calls_remaining > 0 && frame_render_context) {
+        if (dump_calls_remaining > 0 && render_buffer) {
             dump_calls_remaining--;
-            auto& buf = frame_render_context->render_buffer;
+            auto& buf = *render_buffer;
             Log::Log("[frcache] call size=%u drawn_this_frame=%d", buf.size(), drawn_this_frame ? 1 : 0);
             for (uint32_t i = 0; i < buf.size(); i++) {
                 const auto& e = buf[i];
-                auto& frames = frame_render_context->frame_array;
-                const GW::UI::Frame* f = (e.type != FRCACHE_GPU_RENDER && e.index < frames.size()) ? frames[e.index] : nullptr;
+                const auto f = (e.type != FRCACHE_GPU_RENDER && frame_array && e.index < frame_array->size())
+                    ? static_cast<const GW::UI::Frame*>((*frame_array)[e.index]) : nullptr;
                 Log::Log("[frcache]   i=%u type=%u index=%u param=0x%x frame_id=%d visible=%d",
                          i, (uint32_t)e.type, e.index, e.param, f ? (int)f->frame_id : -1, f && f->IsVisible() ? 1 : 0);
             }
         }
 #endif
 
-        // Nothing to do (no overlays, unusable buffer/device) -> run the original untouched.
-        if (callbacks.empty() || !frame_render_context || !device) {
-            FrCacheRenderAll_Ret(param_1, param_2);
+        if ((callbacks.empty() && pre_world_callbacks.empty()) || !render_buffer || !device) {
+            FrCacheRenderAll_Ret(render_target, delta_time);
             GW::Hook::LeaveHook();
             return;
         }
 
-        auto& buffer = frame_render_context->render_buffer;
+        if (!GW::Map::GetIsMapLoaded()
+            || GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) {
+            FrCacheRenderAll_Ret(render_target, delta_time);
+            GW::Hook::LeaveHook();
+            return;
+        }
+
+        auto& buffer = *render_buffer;
 
         uint32_t boundary = 0;
+        uint32_t first_gpu_index = 0;
+        uint32_t world_program_count = 0;
         bool stream_restart = false;
         uint32_t stream_expect = 0;
         for (uint32_t i = 0; i < buffer.size(); i++) {
             const auto& e = buffer[i];
             if (e.type != FRCACHE_GPU_RENDER) continue;
-            if (boundary == 0) boundary = i + 1;
+            if (boundary == 0) {
+                boundary = i + 1;
+                first_gpu_index = e.index;
+            }
             else if (e.index != stream_expect) {
                 stream_restart = true;
                 break;
             }
             stream_expect = e.index + e.param;
+            world_program_count = stream_expect - first_gpu_index;
         }
 
-        // Only the main world-then-HUD pass draws; others pass through, and the guard draws exactly once per frame.
         if (boundary == 0 || boundary >= buffer.size() || drawn_this_frame) {
-            FrCacheRenderAll_Ret(param_1, param_2);
+            FrCacheRenderAll_Ret(render_target, delta_time);
             GW::Hook::LeaveHook();
             return;
         }
 
-        // Second dispatch present: keep GW's calls untouched (single call, single physics tick) and draw the
-        // overlays on top of the HUD for just this frame.
+        SetActiveWorldPrograms(first_gpu_index, world_program_count, 0);
+        RunPreWorldCallbacks(device);
+        active_world_programs = nullptr;
+        active_world_program_count = 0;
+
         if (stream_restart) {
-            FrCacheRenderAll_Ret(param_1, param_2);
-            GW::Render::FlushCommandQueue();
-            RunCallbacks(device);
+            FrCacheRenderAll_Ret(render_target, delta_time);
             drawn_this_frame = true;
             GW::Hook::LeaveHook();
             return;
@@ -147,62 +190,58 @@ namespace {
         auto* const orig_buffer = buffer.m_buffer;
         const auto orig_size = buffer.m_size;
 
-        // 1) world portion
         buffer.m_buffer = orig_buffer;
         buffer.m_size = boundary;
-        FrCacheRenderAll_Ret(param_1, param_2);
+        FrCacheRenderAll_Ret(render_target, delta_time);
 
-        // 2) flush the world into the back/depth buffer, then run the registered overlays
         buffer.m_buffer = orig_buffer;
         buffer.m_size = orig_size;
         GW::Render::FlushCommandQueue();
+        SetActiveWorldPrograms(first_gpu_index, world_program_count, 0);
         RunCallbacks(device);
+        active_world_programs = nullptr;
+        active_world_program_count = 0;
         drawn_this_frame = true;
 
-        // 3) HUD portion (drawn on top of the overlays)
+        GW::Render::FlushCommandQueue();
         buffer.m_buffer = orig_buffer + boundary;
         buffer.m_size = orig_size - boundary;
-        FrCacheRenderAll_Ret(param_1, param_2);
+        FrCacheRenderAll_Ret(render_target, delta_time);
 
-        // restore the buffer for GW
         buffer.m_buffer = orig_buffer;
         buffer.m_size = orig_size;
 
         GW::Hook::LeaveHook();
     }
-    bool hook_attempted = false;
-    bool EnsureHook()
+
+    void EnsureHook()
     {
-        if (hook_attempted)
-            return FrCacheRenderAll_Func != 0;
-        hook_attempted = true;
+        if (compositor_hooked || compositor_failed) return;
+        if (!ScanCompositor()) return;
 
-        // FrCache_RenderAll asserts "frame" in FrCache.cpp at line 0x9e.
-        auto address = GW::Scanner::ToFunctionStart(GW::Scanner::FindUseOfString("FrCache: ignored invalid client viewport rect (%0.6f,%0.6f,%0.6f,%0.6f)"), 0xfff);
-        if (address)
-            FrCacheRenderAll_Func = (FrCacheRenderFn)address;
-        address = address ? GW::Scanner::FindInRange("\xa1????\x83", "x????x", 1, address, address + 0x10) : 0;
-        if (address && GW::Scanner::IsValidPtr(*(uintptr_t*)address))
-            frame_render_context = reinterpret_cast<FrameRenderContext*>((*(uintptr_t*)address) - offsetof(FrameRenderContext, render_buffer.m_size));
-
-        if (!frame_render_context)
-            FrCacheRenderAll_Func = 0;
-
-        if (!FrCacheRenderAll_Func)
-            return false;
-        if (GW::Hook::CreateHook(reinterpret_cast<void**>(&FrCacheRenderAll_Func), OnFrCacheRenderAll, reinterpret_cast<void**>(&FrCacheRenderAll_Ret)) != 0) {
-            FrCacheRenderAll_Func = 0;
-            return false;
+        if (const int result = GW::Hook::CreateHook(
+                reinterpret_cast<void**>(&FrCacheRenderAll_Func), OnFrCacheRenderAll,
+                reinterpret_cast<void**>(&FrCacheRenderAll_Ret));
+            result != 0) {
+            Log::Log(
+                "[compositor] failed to hook FrCache_RenderAll (MinHook status %d). "
+                "Unload standalone Rebirth before enabling Toolbox's in-world renderer.",
+                result);
+            compositor_failed = true;
+            return;
         }
         GW::Hook::EnableHooks(FrCacheRenderAll_Func);
-        return true;
+        compositor_hooked = true;
     }
 
     void RemoveHook()
     {
-        if (FrCacheRenderAll_Func) {
+        if (compositor_hooked && FrCacheRenderAll_Func) {
             GW::Hook::RemoveHook(FrCacheRenderAll_Func);
+            compositor_hooked = false;
         }
+        compositor_failed = false;
+        compositor_scanned = false;
     }
 
     bool ConfigureProgrammablePipeline(IDirect3DDevice9* device)
@@ -226,7 +265,7 @@ namespace {
 
     bool SetWorldTransform(IDirect3DDevice9* device)
     {
-        // Build view/proj matrices matching GW's world-render camera.
+
         constexpr auto vertex_shader_view_matrix_offset = 0u;
         constexpr auto vertex_shader_proj_matrix_offset = 4u;
 
@@ -263,16 +302,19 @@ namespace {
         }
         return true;
     }
-} // namespace
+}
 
-int GameWorldCompositor::RegisterDraw(DrawCallback callback)
+int GameWorldCompositor::RegisterDraw(DrawCallback callback, const int priority)
 {
     if (!callback) {
         return 0;
     }
-    // Defer the actual hook install to BeginFrame (render time): scanning needs game memory ready.
+
     const int token = next_token++;
-    callbacks.emplace_back(token, std::move(callback));
+    callbacks.push_back({token, priority, std::move(callback)});
+    std::stable_sort(callbacks.begin(), callbacks.end(), [](const auto& a, const auto& b) {
+        return a.priority < b.priority;
+    });
     return token;
 }
 
@@ -281,8 +323,25 @@ void GameWorldCompositor::UnregisterDraw(const int token)
     if (token <= 0) {
         return;
     }
-    std::erase_if(callbacks, [token](const auto& entry) { return entry.first == token; });
-    if (callbacks.empty()) {
+    std::erase_if(callbacks, [token](const auto& entry) { return entry.token == token; });
+    if (callbacks.empty() && pre_world_callbacks.empty()) {
+        RemoveHook();
+    }
+}
+
+int GameWorldCompositor::RegisterPreWorldDraw(DrawCallback callback)
+{
+    if (!callback) return 0;
+    const int token = next_token++;
+    pre_world_callbacks.emplace_back(token, std::move(callback));
+    return token;
+}
+
+void GameWorldCompositor::UnregisterPreWorldDraw(const int token)
+{
+    if (token <= 0) return;
+    std::erase_if(pre_world_callbacks, [token](const auto& entry) { return entry.first == token; });
+    if (callbacks.empty() && pre_world_callbacks.empty()) {
         RemoveHook();
     }
 }
@@ -304,13 +363,42 @@ bool GameWorldCompositor::HasFailed()
     return compositor_failed;
 }
 
+bool GameWorldCompositor::GetWorldPrograms(
+    const uint32_t** programs, uint32_t* count, uint32_t* renderer)
+{
+    if (!programs || !count || !renderer || !active_world_programs || active_world_program_count == 0) {
+        return false;
+    }
+    *programs = active_world_programs;
+    *count = active_world_program_count;
+    *renderer = active_world_renderer;
+    return true;
+}
+
+bool GameWorldCompositor::ProgramsBelongToFrCache(
+    const uint32_t* programs, const uint32_t count)
+{
+    if (!programs || !render_programs || !render_programs->begin()) return false;
+    const auto first = reinterpret_cast<uintptr_t>(render_programs->begin());
+    const auto last = first + render_programs->size() * sizeof(uint32_t);
+    const auto candidate = reinterpret_cast<uintptr_t>(programs);
+    return candidate >= first && candidate <= last
+        && count <= (last - candidate) / sizeof(uint32_t);
+}
+
+uint64_t GameWorldCompositor::FrameId()
+{
+    return frame_id;
+}
+
 void GameWorldCompositor::BeginFrame()
 {
-    // Install the hook lazily once something wants to draw; retried each frame until it succeeds or fails.
-    if (!callbacks.empty()) {
+
+    if (!callbacks.empty() || !pre_world_callbacks.empty()) {
         EnsureHook();
     }
     drawn_this_frame = false;
+    ++frame_id;
 }
 
 bool GameWorldCompositor::SetWorldViewProj(IDirect3DDevice9* device)
@@ -323,7 +411,7 @@ void GameWorldCompositor::SetWorldRenderStates(IDirect3DDevice9* device, const b
     if (!device) {
         return;
     }
-    // Fully specify the pipeline: GW's ambient UI state (alpha test/cull/fog/colour-write) would otherwise discard our draw. The caller's state block restores it on exit.
+
     device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
     device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
     device->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
@@ -339,10 +427,10 @@ void GameWorldCompositor::SetWorldRenderStates(IDirect3DDevice9* device, const b
     device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
     device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
     device->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, TRUE);
-    device->SetRenderState(D3DRS_ANTIALIASEDLINEENABLE, TRUE); // MULTISAMPLEANTIALIAS doesn't smooth native D3DPT_LINELIST/LINESTRIP draws (navmesh, in-world path lines)
+    device->SetRenderState(D3DRS_ANTIALIASEDLINEENABLE, TRUE);
 
     if (occlude) {
-        // Depth-test against the scene so geometry occludes the overlay; never write depth (must not disturb GW's values).
+
         device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
         device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
         device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
@@ -358,7 +446,7 @@ void GameWorldCompositor::SetDistanceFog(IDirect3DDevice9* device, const float m
         return;
     }
     const GW::Camera* cam = GW::CameraMgr::GetCamera();
-    // Pixel shader constants (all Float4): c0 camera focus, c1 max distance, c2 fog start.
+
     const float cur_pos_constant[4] = {cam ? cam->look_at_target.x : 0.f, cam ? cam->look_at_target.y : 0.f, cam ? cam->look_at_target.z : 0.f, 0.0f};
     device->SetPixelShaderConstantF(0, cur_pos_constant, 1);
     const float max_dist_constant[4] = {max_distance, 0.0f, 0.0f, 0.0f};
@@ -394,6 +482,10 @@ void GameWorldCompositor::Terminate()
 {
     RemoveHook();
     callbacks.clear();
+    pre_world_callbacks.clear();
+    active_world_programs = nullptr;
+    active_world_program_count = 0;
+    compositor_scanned = compositor_failed = drawn_this_frame = false;
     if (vshader) {
         vshader->Release();
         vshader = nullptr;

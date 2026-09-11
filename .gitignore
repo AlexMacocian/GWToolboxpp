@@ -13,6 +13,7 @@ build/
 build-clang/
 build-wasm/
 build-xwin/
+/build-wine*/
 .xwin-toolchain/
 
 # Cmake generated
@@ -39,6 +40,8 @@ CMakeCache.txt
 *.opendb
 *.log
 *.lastbuildstate
+*.dmp
+*.bak
 
 # Compiled files
 *.slo
@@ -77,3 +80,7 @@ GWToolbox.aps
 # VSCode stuff
 .vscode/
 .aider*
+
+# Python caches
+__pycache__/
+*.py[cod]

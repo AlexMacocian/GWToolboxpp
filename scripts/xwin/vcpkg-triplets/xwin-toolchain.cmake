@@ -9,6 +9,7 @@
 # XWIN_SDK is the `xwin splat` output directory (see scripts/xwin/setup-toolchain.sh).
 set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_SYSTEM_PROCESSOR x86)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 if(NOT XWIN_SDK)
     set(XWIN_SDK "$ENV{XWIN_SDK}")

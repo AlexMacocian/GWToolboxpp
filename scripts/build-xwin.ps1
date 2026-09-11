@@ -92,7 +92,6 @@ $runArgs += @(
   '-w', '/src'
   '-e', "CONFIG=$Config"
   '-e', "TARGET=$Target"
-  '-e', "CMAKE_ARGS=$($CMakeArg -join ' ')"
 )
 # Bind mounts from a Windows host have no Linux ownership to hand back, so unlike the .sh
 # there is deliberately no HOST_UID/HOST_GID and no chown pass.
@@ -105,7 +104,7 @@ if ($Shell) {
 }
 
 Write-Host "[build-xwin] configuring (preset: xwin, config: $Config)..."
-docker @runArgs /src/scripts/xwin/build-in-container.sh
+docker @runArgs /src/scripts/xwin/build-in-container.sh @CMakeArg
 if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
 
 Write-Host "[build-xwin] done; artefacts are in $(Join-Path $RepoRoot 'bin')"

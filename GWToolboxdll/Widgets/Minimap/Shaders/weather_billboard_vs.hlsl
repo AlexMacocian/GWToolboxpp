@@ -1,5 +1,6 @@
-// World-space textured billboard: corners are pre-built in world coords on the CPU; this only
-// transforms them and passes UV + world position (for the distance fade in the pixel shader).
+// World-space textured billboard whose corners are pre-built in world coordinates on the CPU.
+// Used for the splash sprite sheet, where every quad needs its own UV rect and per-quad colour,
+// so instancing (which shares both across a draw) does not apply.
 float4x4 view_matrix : register(c0);
 float4x4 proj_matrix : register(c4);
 
@@ -10,13 +11,14 @@ struct VS_INPUT {
 };
 
 struct VS_OUTPUT {
-    float4 position : SV_POSITION;
+    float4 position : POSITION;
     float4 color : COLOR;
     float2 uv : TEXCOORD0;
-    float4 world : TEXCOORD1; // world coords for the distance check
+    float4 world : TEXCOORD1; // world coords, for the distance fade
 };
 
-VS_OUTPUT main(VS_INPUT input) {
+VS_OUTPUT main(VS_INPUT input)
+{
     VS_OUTPUT output;
     output.color = input.color;
     output.uv = input.uv;

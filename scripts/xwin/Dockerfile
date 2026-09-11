@@ -31,6 +31,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         flex \
         libjson-perl \
         libvulkan-dev \
+        wine64-tools \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
@@ -72,10 +73,11 @@ ENV PATH="${VCPKG_ROOT}:${PATH}"
 # image build time, so it re-runs (cheaply) from the entrypoint against the mounted source.
 ENV TOOLCHAIN_ROOT=/opt/xwin-toolchain
 COPY setup-toolchain.sh /opt/xwin/setup-toolchain.sh
+COPY vkd3d-d3dcompile.patch /opt/xwin/vkd3d-d3dcompile.patch
 RUN chmod +x /opt/xwin/setup-toolchain.sh && /opt/xwin/setup-toolchain.sh
 
 ENV XWIN_SDK=/opt/xwin-toolchain/xwin-sdk
-ENV VKD3D_COMPILER=/opt/xwin-toolchain/vkd3d-1.19/vkd3d-compiler
+ENV VKD3D_COMPILER=/opt/xwin-toolchain/vkd3d-compiler
 
 COPY build-in-container.sh /opt/build-in-container.sh
 RUN chmod +x /opt/build-in-container.sh

@@ -312,7 +312,7 @@ LONG WINAPI CrashHandler::Crash(EXCEPTION_POINTERS* pExceptionPointers, const ch
     }
 
 
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !GWTOOLBOX_ALLOW_UNSUPPORTED_CRASH_DUMPS
     if (!Updater::IsLatestVersion()) {
         const std::wstring error_message = L"YOU ARE NOT USING THE LATEST VERSION OF GWTOOLBOX++!\n\n"
             L"Please update to the latest version before reporting any issues.\n"

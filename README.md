@@ -33,11 +33,14 @@ If you are here to check toolbox features or for a download link, go to [https:/
 
 `clang` targets `i686-pc-windows-msvc` directly, linking with `lld-link`, against MSVC CRT
 and Windows SDK headers/libs fetched by [xwin](https://github.com/Jake-Shadle/xwin) from
-Microsoft's official installer manifests. Nothing Microsoft-built ever executes, so no Wine
-is involved and builds run at full `-j`. The twelve SM3 shaders are compiled by
+Microsoft's official installer manifests. C++ compilation, resource compilation, linking
+and shader compilation run natively on Linux, without Wine. SM3 shaders are compiled by
 [vkd3d-shader](https://gitlab.winehq.org/wine/vkd3d) in place of `fxc.exe`, since `fxc` is
 the only Microsoft compiler still emitting shader model 1-3 and `dxc` dropped everything
-below SM6.
+below SM6. The toolchain pins vkd3d-shader 2.0 at `be62407e706ca155a36e7f7dd4422b479bca32a9`,
+matching the compiler used by the original Rebirth shaders. The small CLI patch preserves
+D3DCompile's global-uniform and floating-point defaults; it does not modify any HLSL.
+Older vkd3d 1.19 cannot compile these shaders' SM3 loops.
 
 **With Docker** - the only requirement is [Docker](https://docs.docker.com/get-docker/):
 
@@ -50,15 +53,16 @@ take a while), then configures and builds `GWToolboxdll` into `bin/GWToolboxdll.
 runs reuse the cached image and only rebuild changed files.
 
 Options (see `./scripts/build-xwin.sh --help`):
+* `--host` - build directly on Linux without Docker
 * `--target <name>` - build a different CMake target (default: `GWToolboxdll`; use `all` for everything)
 * `--config <Debug|RelWithDebInfo|Release>` - CMake config to build (default: `RelWithDebInfo`)
 * `--jobs <n>` - parallel build jobs (default: all cores)
 * `--shell` - drop into a shell in the build container instead of building
 * `--rebuild-image` - force a clean rebuild of the Docker image
 
-The container runs as root; the script hands ownership of anything it writes back to your
-user once done. Build output lives in `build-xwin/` (gitignored) - delete it for a fully
-clean reconfigure, e.g. after switching `--config` or branches.
+The container runs as root; the script hands ownership of `build-xwin/`, `bin/` and generated
+shader headers back to your user, including after a failed build. Every invocation reconfigures the gitignored
+`build-xwin/` directory, so changes to `--config` and `--cmake-arg` take effect immediately.
 
 On a Windows host, `scripts\build-xwin.ps1` drives the same container through Docker Desktop
 (`-Config`, `-Target`, `-Jobs`, `-Shell`, `-RebuildImage`). Use it to reproduce a CI result or
@@ -70,14 +74,58 @@ outright with `error STL1000`; note Ubuntu 24.04 still ships 18), `lld`, `llvm` 
 `llvm-rc`/`llvm-lib`/`llvm-mt`), `cmake` >= 3.29, `ninja`, `python3`, and a bootstrapped
 `vcpkg` in `$VCPKG_ROOT`. Some distros do not ship a `clang-cl`; it is the same binary as
 `clang` selected by name, so `ln -s $(command -v clang) /usr/local/bin/clang-cl` is enough.
+Building vkd3d also needs a native C compiler, `make`, `pkg-config`, `flex`, `bison`,
+Autotools, native `widl`, Perl's `JSON` module and Vulkan headers (`wine64-tools`,
+`libjson-perl` and `libvulkan-dev` on Debian/Ubuntu). `widl` is a Linux executable:
+neither a Wine process nor a Vulkan runtime is needed.
 
 ```sh
-./scripts/xwin/setup-toolchain.sh          # one-off: SDK (~800MB) + vkd3d-compiler
-export XWIN_SDK="$PWD/.xwin-toolchain/xwin-sdk"
-export VKD3D_COMPILER="$PWD/.xwin-toolchain/vkd3d-1.19/vkd3d-compiler"
-cmake --preset xwin -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build-xwin -j"$(nproc)"
+export VCPKG_ROOT=/path/to/vcpkg
+./scripts/build-xwin.sh --host --config RelWithDebInfo --jobs 6
+file bin/GWToolboxdll.dll
 ```
+
+The optional shader-only Wine path accepts `fxc.exe` from the Windows SDK:
+
+```sh
+./scripts/build-xwin.sh --host --config RelWithDebInfo --jobs 6 \
+  --cmake-arg "-DFXC=/path/to/WindowsSDK/bin/x64/fxc.exe"
+```
+
+Only HLSL compilation runs through Wine in this mode; C++ and linking still use native
+`clang-cl` and `lld-link`. The shader runner preserves `WINEDLLOVERRIDES` and uses a
+dedicated `.xwin-toolchain/wine-shaders` prefix unless `WINEPREFIX` is set. Rebirth's Wine
+build used the builtin vkd3d-backed D3DCompile implementation, not Microsoft's native
+`d3dcompiler_47.dll`; forcing the latter rejects some unchanged SM3 shaders.
+
+The first invocation provisions `.xwin-toolchain/`; subsequent builds reuse it.
+The output is `bin/GWToolboxdll.dll`, a **PE32 DLL for Intel 80386**, not a native Linux
+library or a 64-bit Windows DLL. CMake also rejects targets whose pointer size is not
+four bytes. The script does not install or deploy the DLL.
+
+To build against an unmerged sibling GWCA checkout, including its local changes:
+
+```sh
+VCPKG_ROOT=/path/to/vcpkg ./scripts/build-xwin.sh --host --jobs 6 --gwca-source ../GWCA
+```
+
+This builds GWCA with the same xwin SDK, stages its matching DLL/import library/headers
+in `Dependencies/GWCA`, then builds Toolbox and embeds that exact DLL. Neither build
+runs WASM or needs GitHub artifacts.
+
+### Weather atmosphere test iteration
+
+Enable **Weather**, then opt in to **Atmospheric sky and lighting** in its settings.
+This enables the replacement sky, lighting, native caster shadows and water; existing
+`/weather` and `/climate` controls remain available with atmosphere off. Sky tuning is
+session-only. Unload standalone Rebirth before testing this port. Rezone when comparing
+baked terrain shadows: tiles already streamed with cleared shadows cannot be restored
+by toggling the effect off.
+
+Local xwin builds write crash dumps even when the updater considers the build outdated
+or plugins are loaded. Keep the matching `bin/GWToolboxdll.pdb` with your test DLL.
+Release builds retain the normal reporting restrictions; pass
+`--cmake-arg -DGWTOOLBOX_ALLOW_UNSUPPORTED_CRASH_DUMPS=OFF` to retain them in xwin too.
 
 Caveats: vkd3d-shader has no SM1-3 optimiser, so the shader bytecode is longer than `fxc`'s
 (register allocation is unaffected). Releases are still cut on Windows with MSVC - validate
