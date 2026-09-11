@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -63,7 +64,17 @@ namespace GW {
         GWCA_API bool IsAccessible(uintptr_t address, size_t length, ScannerSection section = ScannerSection::Section_DATA);
 
         GWCA_API uintptr_t FindUnique(const char* pattern, const char* mask = nullptr, ScannerSection section = ScannerSection::Section_TEXT);
+        // Resolves CALL or tail-JMP instructions, validating the target's prologue.
         GWCA_API uintptr_t FindCallee(uintptr_t caller, uint32_t offset, const char* prologue, const char* mask = nullptr);
+        struct FunctionCall {
+            uintptr_t instruction;
+            uintptr_t target;
+        };
+        GWCA_API std::vector<FunctionCall> FindFunctionCalls(uintptr_t caller, bool* complete = nullptr);
+        GWCA_API std::vector<uintptr_t> FindCallees(uintptr_t caller, const char* prologue, const char* mask = nullptr);
+        GWCA_API std::vector<uintptr_t> FindCallees(std::span<const uintptr_t> callers, const char* prologue, const char* mask = nullptr);
+        GWCA_API uintptr_t FindCallee(uintptr_t caller, const char* prologue, const char* mask = nullptr);
+        GWCA_API uintptr_t FindCallee(std::span<const uintptr_t> callers, const char* prologue, const char* mask = nullptr);
         GWCA_API uintptr_t ReadGlobalAddress(uintptr_t operand, size_t size, size_t alignment, uint32_t subtract = 0);
 
         template<typename T>

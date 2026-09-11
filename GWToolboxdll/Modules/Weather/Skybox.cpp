@@ -400,7 +400,6 @@ namespace {
     AvShadowBuild_pt AvShadowBuild_Ret = nullptr;
 
     SceneProgramList* world_scene_programs = nullptr;
-    SceneProgramList* world_secondary_scene_programs = nullptr;
     bool shadow_scene_rebuild_active = false;
     bool shadow_explicit_camera_render_active = false;
     float shadow_scene_eye[3]{};
@@ -4791,7 +4790,6 @@ void Skybox::Initialize()
     BIND_WORLD_FUNCTION(GetPropLodScale);
 #undef BIND_WORLD_FUNCTION
     world_scene_programs = bindings->world_scene_programs;
-    world_secondary_scene_programs = bindings->world_secondary_scene_programs;
     gw_sky_clear_colour = bindings->sky_clear_colour;
     shadow_terrain_visibility.fill(0xffffffffu);
 

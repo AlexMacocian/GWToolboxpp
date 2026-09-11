@@ -73,10 +73,7 @@ namespace GW::Render {
         void(__cdecl* CameraRenderScope)(int enabled);
         void(__cdecl* SceneRenderScope)(int enabled);
         float(__cdecl* GetPropLodScale)(void* view);
-        void(__cdecl* FrCacheRenderAll)(uint32_t render_target, float delta_time);
-        FrameRenderContext* frame_context;
         SceneProgramList* world_scene_programs;
-        SceneProgramList* world_secondary_scene_programs;
         uint32_t* sky_clear_colour;
     };
 
